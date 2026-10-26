@@ -13,6 +13,8 @@ class SlurmCommandResponse():
         self.output = output
         # Set by sbatch requests
         self.job_id: int | None = None
+        # Exit code to use when there are errors (default 1)
+        self.exit_code: int | None = None
 
 
 class ApiClientException(Exception):
@@ -107,6 +109,24 @@ class SlurmAPIClientWrapper(ABC):
             by the SLURM API            
         """
         pass
+
+
+
+    def scancel_delete_request(self,request:dict,conf:openapi_client.Configuration,slurmrestd_token:str,quiet:bool=False)-> SlurmCommandResponse:
+        """
+        Sends a DELETE request to the jobs endpoint (cancel or signal jobs).
+
+        Args:
+            request (dict): kill_jobs_msg payload (jobs, signal, filters)
+            conf (openapi_client.Configuration): The configuration object for the API client.
+            slurmrestd_token (str): The authentication token for the SLURM REST API.
+            quiet (bool): don't report jobs that no longer exist (scancel -Q)
+
+        Raises:
+            ApiClientException: If there is an error on the proxy, different from the errors returned
+            by the SLURM API
+        """
+        raise NotImplementedError("scancel is not supported for this API version")
 
 
 

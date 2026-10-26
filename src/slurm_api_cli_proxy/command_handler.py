@@ -111,8 +111,7 @@ class CommandEvaluator(ABC):
             if (len(response.errors)>0):
                 for error in response.errors:
                     print(error, file=sys.stderr)
-                #TODO check if special error codes are required
-                return 1
+                return response.exit_code or 1
             else:
                 if response.output:
                     print(response.output)

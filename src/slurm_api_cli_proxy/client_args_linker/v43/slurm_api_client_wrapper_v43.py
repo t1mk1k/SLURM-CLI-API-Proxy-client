@@ -15,6 +15,10 @@ from openapi_client.models.v0043_job_res import V0043JobRes, V0043JobResNodes
 from openapi_client.models.v0043_uint64_no_val_struct import V0043Uint64NoValStruct
 from openapi_client.models.v0043_uint16_no_val_struct import V0043Uint16NoValStruct
 
+#scancel related
+from openapi_client.models.v0043_kill_jobs_msg import V0043KillJobsMsg
+from openapi_client.models.v0043_openapi_kill_jobs_resp import V0043OpenapiKillJobsResp
+
 #scontrol related
 from openapi_client.models.v0043_job_desc_msg import V0043JobDescMsg
 from openapi_client.models.v0043_openapi_job_post_response import V0043OpenapiJobPostResponse
@@ -33,6 +37,9 @@ from openapi_client.models.v0043_partition_info_nodes import V0043PartitionInfoN
 from openapi_client.models.v0043_openapi_partition_resp import V0043OpenapiPartitionResp
 
 class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
+
+    # ESLURM_INVALID_JOB_ID, ESLURM_ALREADY_DONE: scancel doesn't report these
+    SCANCEL_SILENT_ERRORS = {2017, 2021}
 
     def sbatch_post_request(self,request:dict,conf:openapi_client.Configuration,slurmrestd_token:str)-> SlurmCommandResponse:     
         #Based on the code snippet included on the documentation generated from the Slurm OpenAPI specification
@@ -99,6 +106,56 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
         if not messages:
             messages.append(f"{command}: error: SLURM API request failed (HTTP {ae.status}): {ae.reason}")
         return messages
+
+
+
+    def scancel_delete_request(self,request:dict,conf:openapi_client.Configuration,slurmrestd_token:str,quiet:bool=False)-> SlurmCommandResponse:
+        # quiet (-Q) is accepted for compatibility: the errors it suppresses in scancel
+        # (jobs already gone) are never reported, as in Slurm 25.05.
+        configuration = conf
+        configuration.api_key['token'] = slurmrestd_token
+
+        with openapi_client.ApiClient(configuration) as api_client:
+            api_instance = openapi_client.SlurmApi(api_client)
+
+            kill_jobs_msg = V0043KillJobsMsg.from_dict(request)
+            response = SlurmCommandResponse()
+
+            try:
+                api_response:V0043OpenapiKillJobsResp = api_instance.slurm_v0043_delete_jobs(kill_jobs_msg)
+            except ApiException as ae:
+                # A failed request can still list per-job results; use them when present
+                try:
+                    api_response = V0043OpenapiKillJobsResp.from_json(ae.body) if ae.body else None  # type: ignore[assignment]
+                except Exception:
+                    api_response = None  # type: ignore[assignment]
+                if api_response is None or not api_response.status:
+                    response.errors.extend(V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "scancel"))
+                    return response
+            except Exception as e:
+                raise ApiClientException(f'Unexpected error while performing a DELETE request for the scancel command:{e}') from e
+
+            # Only jobs that could not be signalled are listed in 'status'; an empty list means
+            # success. Like scancel (Slurm 25.05), jobs that don't exist (anymore) or are
+            # already completing are not reported; other failures (e.g. permission denied)
+            # are, and the exit code is Slurm's error number modulo 256 (as scancel's).
+            for job_status in api_response.status or []:
+                err = job_status.error
+                if err is None or not (err.code or err.message or err.string):
+                    continue
+                if err.code in V43SlurmAPIClientWrapper.SCANCEL_SILENT_ERRORS:
+                    continue
+                job_label = job_status.step_id or (job_status.job_id.number if job_status.job_id else "?")
+                message = err.message or err.string or f"error code {err.code}"
+                response.errors.append(f"scancel: error: Kill job error on job id {job_label}: {message}")
+                if err.code:
+                    response.exit_code = err.code % 256 or 1
+
+            for api_err in api_response.errors or []:
+                if api_err.description or api_err.error:
+                    response.errors.append(f"scancel: error: {api_err.description or api_err.error}")
+
+            return response
 
 
 

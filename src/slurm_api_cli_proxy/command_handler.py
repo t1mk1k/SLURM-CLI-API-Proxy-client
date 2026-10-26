@@ -15,7 +15,7 @@ from slurm_api_cli_proxy.client_args_linker.args_to_payload_mapper import args_t
 from slurm_api_cli_proxy.client_args_linker.slurm_api_client_wrapper import SlurmAPIClientWrapper
 import openapi_client
 import logging
-from .arguments_evaluator import build_parser
+from .arguments_evaluator import build_parser, parse_sbatch_directives, DirectiveError
 
 
 logging.basicConfig(
@@ -176,6 +176,16 @@ class SbatchEvaluator(CommandEvaluator):
         #Removing the (provisional) argument used to capture the input file    
         cli_args_dict = vars(cli_args)
         cli_args_dict.pop(self.input_file_argument_name)
+
+        # '#SBATCH' directives in the script: the REST API ignores them, so apply them
+        # here. As with sbatch, options on the command line take precedence.
+        try:
+            directive_args = parse_sbatch_directives(command_mappings_config, input_script)
+        except DirectiveError as e:
+            return SlurmCommandResponse(errors=[f"sbatch: error: {e.message}"])
+        for name, value in directive_args.items():
+            if cli_args_dict.get(name) is None or cli_args_dict.get(name) is False:
+                cli_args_dict[name] = value
 
         self.ensure_default_working_dir(slurm_user, cli_args_dict)
 

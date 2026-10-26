@@ -11,7 +11,7 @@ import traceback
 from typing import Tuple
 from slurm_api_cli_proxy.mappings.cli_to_json_map import CliToJsonPayloadMappings
 from slurm_api_cli_proxy.client_args_linker.slurm_api_client_wrapper import SlurmCommandResponse, get_slurm_api_client_wrapper,ApiClientException
-from slurm_api_cli_proxy.client_args_linker.args_to_payload_mapper import args_to_sbatch_request_payload,args_to_parameters_dict,args_to_scontrol_request_payload,UnsuportedArgumentException
+from slurm_api_cli_proxy.client_args_linker.args_to_payload_mapper import args_to_sbatch_request_payload,args_to_parameters_dict,args_to_scontrol_request_payload,args_to_scancel_request_payload,UnsuportedArgumentException
 from slurm_api_cli_proxy.client_args_linker.slurm_api_client_wrapper import SlurmAPIClientWrapper
 import openapi_client
 import logging
@@ -58,6 +58,11 @@ class CommandEvaluator(ABC):
         pass
 
 
+    def add_extra_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Hook for command-specific arguments that are not in the mapping file (e.g. positionals)."""
+        pass
+
+
     def eval_command(self,config_file_path:str,include_input_file_arg:bool=False) -> int:
         try:
             #Command setup (general)
@@ -66,7 +71,8 @@ class CommandEvaluator(ABC):
             #Sbatch has an error code = 130 when aborted (ctrl-c) (codes 129-192 indicate jobs terminated by Linux signals) 
             signal.signal(signal.SIGINT, lambda signum,frame : sys.exit(130))
 
-            reference = resources.files(__name__) / config_file_path
+            # files() of the package (not of this module): works on Python 3.10+ (module names need 3.12+)
+            reference = resources.files("slurm_api_cli_proxy") / config_file_path
             with resources.as_file(reference) as squeue_mappings_file_path:
               command_mappings_config = CliToJsonPayloadMappings(yaml_config_path=str(squeue_mappings_file_path))
 
@@ -77,6 +83,8 @@ class CommandEvaluator(ABC):
 
             if (include_input_file_arg):
                 cli_param_parser.add_argument(self.input_file_argument_name, nargs='?', help='Input script')
+
+            self.add_extra_arguments(cli_param_parser)
 
             cli_args = cli_param_parser.parse_args()
 
@@ -219,6 +227,24 @@ class ScontrolEvaluator(CommandEvaluator):
 
         return response
 
+class ScancelEvaluator(CommandEvaluator):
+
+    job_ids_argument_name = 'proxy_cli_job_ids'
+
+    def add_extra_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(self.job_ids_argument_name, nargs='*', metavar='job_id', help='Job id(s) to cancel/signal (e.g. 123 or 123_4)')
+
+    def process_command_args(self,slurm_cli_wrapper:SlurmAPIClientWrapper,cli_args,command_mappings_config:CliToJsonPayloadMappings,configuration:openapi_client.Configuration,slurm_jwt:str,slurm_user:str)->SlurmCommandResponse:
+
+        cli_args_dict = dict(vars(cli_args))
+        job_ids = cli_args_dict.pop(self.job_ids_argument_name) or []
+        quiet = bool(cli_args_dict.get("quiet"))
+
+        request = args_to_scancel_request_payload(job_ids=job_ids, cmd_args_dict=cli_args_dict, scancel_mappings=command_mappings_config)
+
+        return slurm_cli_wrapper.scancel_delete_request(request, configuration, slurm_jwt, quiet=quiet)
+
+
 class SinfoEvaluator(CommandEvaluator):
     def process_command_args(self,slurm_cli_wrapper:SlurmAPIClientWrapper,cli_args,command_mappings_config:CliToJsonPayloadMappings,configuration:openapi_client.Configuration,slurm_jwt:str,slurm_user:str)->SlurmCommandResponse:    
 
@@ -258,3 +284,9 @@ def sinfo() -> int:
 
 
 
+
+
+def scancel() -> int:
+
+    eval = ScancelEvaluator()
+    return eval.eval_command(config_file_path='mappings/scancel_mappings_r25.05_v0.0.43.yaml')

@@ -50,21 +50,55 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
             if v0043_job_submission_instance is None:
                 raise ValueError(f"Creation of sbatch job submission payload form json returned None when using {json_req_string}")
             
+            response = SlurmCommandResponse()
+
             try:
                 # submit the job
                 api_response = api_instance.slurm_v0043_post_job_submit(v0043_job_submission_instance)
-                
-                response = SlurmCommandResponse()
-                
-                if api_response.errors is not None:
-                    for err in api_response.errors:
-                        #Based on V0043Error type
-                        response.errors.append(f"Error no:{err.error_number}:{err.error}. Source:{err.source}. Description:{err.description}")
-                
+            except ApiException as ae:
+                # Slurm reports rejected submissions (bad partition, account, ...) as HTTP errors
+                # with an 'errors' list in the body: show those like sbatch would.
+                response.errors.extend(V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "sbatch"))
                 return response
-
             except Exception as e:
-                raise ApiClientException(f'Unexpected error while performing a POST request for the sbatch command:{e}') from e                
+                raise ApiClientException(f'Unexpected error while performing a POST request for the sbatch command:{e}') from e
+
+            if api_response.errors:
+                for err in api_response.errors:
+                    #Based on V0043Error type
+                    response.errors.append(f"Error no:{err.error_number}:{err.error}. Source:{err.source}. Description:{err.description}")
+
+            if api_response.job_submit_user_msg:
+                # sbatch prints the job_submit plugin's message to stderr
+                response.warnings.append(api_response.job_submit_user_msg)
+
+            if not response.errors:
+                if api_response.job_id is None:
+                    response.errors.append("sbatch: error: the SLURM API did not return a job id")
+                else:
+                    # Same output as sbatch; tools such as dask-jobqueue parse the job id from it
+                    response.output = f"Submitted batch job {api_response.job_id}"
+                    response.job_id = api_response.job_id
+
+            return response
+
+
+    @staticmethod
+    def errors_from_api_exception(ae: ApiException, command: str) -> List[str]:
+        """Turn the 'errors' list in a failed API response into CLI error lines."""
+        messages: List[str] = []
+        if ae.body:
+            try:
+                body = json.loads(ae.body)
+                for err in body.get("errors") or []:
+                    description = err.get("description") or ""
+                    error = err.get("error") or ""
+                    messages.append(f"{command}: error: {description}{': ' if description and error else ''}{error}")
+            except (ValueError, AttributeError):
+                pass
+        if not messages:
+            messages.append(f"{command}: error: SLURM API request failed (HTTP {ae.status}): {ae.reason}")
+        return messages
 
 
 

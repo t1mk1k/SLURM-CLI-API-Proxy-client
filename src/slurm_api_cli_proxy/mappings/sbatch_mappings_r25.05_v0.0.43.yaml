@@ -42,6 +42,13 @@ parameters:
     api_mapping:
       request_property: job.current_working_directory
 
+  # Handled by the proxy itself (not sent to the API): print only the job id
+  - name: --parsable
+    abbreviation: --parsable
+    is_mandatory: false
+    data_type: bool
+    cli_only: true
+
 
   # - name: --array
   #   abbreviation: -a

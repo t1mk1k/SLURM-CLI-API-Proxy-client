@@ -58,7 +58,7 @@ class CommandEvaluator(ABC):
         pass
 
 
-    def eval_command(self,config_file_path:str,include_input_file_arg:bool=False):
+    def eval_command(self,config_file_path:str,include_input_file_arg:bool=False) -> int:
         try:
             #Command setup (general)
 
@@ -97,25 +97,30 @@ class CommandEvaluator(ABC):
                 slurm_user=slurm_user
             )
 
+            for warning in response.warnings:
+                print(warning, file=sys.stderr)
+
             if (len(response.errors)>0):
-                print(response.errors)
+                for error in response.errors:
+                    print(error, file=sys.stderr)
                 #TODO check if special error codes are required
                 return 1
             else:
-                print(response.output)
+                if response.output:
+                    print(response.output)
                 return 0
 
 
         #Errors caught while building the request
         except MissingEnvironmentVar as e:
-            print(f"[SLURM_CLI_PROXY_ERROR]: Missing environment variable:{e.missing_var}")
+            print(f"[SLURM_CLI_PROXY_ERROR]: Missing environment variable:{e.missing_var}", file=sys.stderr)
             return 1
         except UnsuportedArgumentException as e:
-            print(f"[SLURM_CLI_PROXY_ERROR]: Unsupported argument (or not yet implemented):{e.message}")
+            print(f"[SLURM_CLI_PROXY_ERROR]: Unsupported argument (or not yet implemented):{e.message}", file=sys.stderr)
             return 1
         except ApiClientException as e:
             #TODO debug log
-            print(f"[SLURM_CLI_PROXY_ERROR]: API client exception:{e}")
+            print(f"[SLURM_CLI_PROXY_ERROR]: API client exception:{e}", file=sys.stderr)
             return 1
         
 
@@ -167,11 +172,17 @@ class SbatchEvaluator(CommandEvaluator):
 
         self.ensure_default_working_dir(slurm_user, cli_args_dict)
 
+        parsable = bool(cli_args_dict.get("parsable"))
+
         #transforms the values given to the parameters and the script file into a dictionary
         #with the structure required by the JSON file sent by the SLURM API client
         job_request = args_to_sbatch_request_payload(script_content=input_script,cmd_args_dict=cli_args_dict,sbatch_mappings=command_mappings_config)
 
         response:SlurmCommandResponse = slurm_cli_wrapper.sbatch_post_request(job_request, configuration,slurm_jwt)
+
+        if parsable and response.job_id is not None:
+            # sbatch --parsable prints only the job id
+            response.output = str(response.job_id)
 
         return response
 
@@ -219,28 +230,28 @@ class SinfoEvaluator(CommandEvaluator):
         return response
 
 
-def sbatch():
+def sbatch() -> int:
 
     eval = SbatchEvaluator()
-    eval.eval_command(config_file_path='mappings/sbatch_mappings_r25.05_v0.0.43.yaml',include_input_file_arg=True)
+    return eval.eval_command(config_file_path='mappings/sbatch_mappings_r25.05_v0.0.43.yaml',include_input_file_arg=True)
 
 
-def squeue():
+def squeue() -> int:
 
     eval = SqueueEvaluator()
-    eval.eval_command(config_file_path='mappings/squeue_mappings_r25.05_v0.0.43.yaml')    
+    return eval.eval_command(config_file_path='mappings/squeue_mappings_r25.05_v0.0.43.yaml')    
 
 
-def scontrol():
+def scontrol() -> int:
 
     eval = ScontrolEvaluator()
-    eval.eval_command(config_file_path='mappings/scontrol_mappings_r25.05_v0.0.43.yaml')    
+    return eval.eval_command(config_file_path='mappings/scontrol_mappings_r25.05_v0.0.43.yaml')    
 
 
-def sinfo():
+def sinfo() -> int:
 
     eval = SinfoEvaluator()
-    eval.eval_command(config_file_path='mappings/sinfo_mappings_r25.05_v0.0.43.yaml')    
+    return eval.eval_command(config_file_path='mappings/sinfo_mappings_r25.05_v0.0.43.yaml')    
     
 
 

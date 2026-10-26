@@ -72,7 +72,11 @@ def args_to_sbatch_request_payload(script_content:str,cmd_args_dict:dict,sbatch_
             # look in the mappings for the corresponding property that 
             # must be included on the request payload
             arg_mappings = sbatch_mappings.arguments_dict[original_arg_name]
-            
+
+            # Options handled by the CLI itself (e.g. --parsable) are not sent to the API
+            if arg_mappings.get('cli_only'):
+                continue
+
             if 'api_mapping' in arg_mappings:
                 ## path within the dictionary/JSON doc where the property will be included
                 doc_path = arg_mappings['api_mapping']['request_property']

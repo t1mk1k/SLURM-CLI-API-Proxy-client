@@ -22,6 +22,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+# urllib3 logs a warning for every connection retry; the command reports the final error itself
+logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 class MissingEnvironmentVar(Exception):    
     def __init__(self, missing_var, message="Required environment variables are missing"):

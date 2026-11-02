@@ -70,5 +70,6 @@ def test_sbatch_api_error_goes_to_stderr_with_exit_1(env, monkeypatch, capsys, t
 def test_errors_from_api_exception_without_body():
     err = ApiException(status=401, reason="Unauthorized")
     assert V43SlurmAPIClientWrapper.errors_from_api_exception(err, "scancel") == [
-        "scancel: error: SLURM API request failed (HTTP 401): Unauthorized"
+        "scancel: error: SLURM API request failed (HTTP 401): Unauthorized",
+        "scancel: error: the SLURM API did not accept the token in SLURM_JWT (missing, invalid or expired?)",
     ]

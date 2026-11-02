@@ -1,3 +1,4 @@
+import logging
 from slurm_api_cli_proxy.client_args_linker.slurm_api_client_wrapper import SlurmAPIClientWrapper, ApiClientException, SlurmCommandResponse
 from slurm_api_cli_proxy.client_args_linker.constants import slurm_statuses
 from openapi_client.models.v0043_openapi_error import V0043OpenapiError
@@ -24,7 +25,7 @@ from openapi_client.models.v0043_job_desc_msg import V0043JobDescMsg
 from openapi_client.models.v0043_openapi_job_post_response import V0043OpenapiJobPostResponse
 
 from openapi_client.rest import ApiException
-from openapi_client.exceptions import ServiceException, NotFoundException
+from urllib3.exceptions import HTTPError as Urllib3HTTPError
 
 import os
 import json
@@ -67,6 +68,9 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
                 # with an 'errors' list in the body: show those like sbatch would.
                 response.errors.extend(V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "sbatch"))
                 return response
+            except Urllib3HTTPError as ce:
+                response.errors.extend(V43SlurmAPIClientWrapper.connection_error(ce, "sbatch", configuration))
+                return response
             except Exception as e:
                 raise ApiClientException(f'Unexpected error while performing a POST request for the sbatch command:{e}') from e
 
@@ -90,9 +94,12 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
             return response
 
 
+    # HTTP statuses slurmrestd uses when the token is missing, invalid or expired
+    AUTH_FAILURE_STATUSES = {401, 511}
+
     @staticmethod
     def errors_from_api_exception(ae: ApiException, command: str) -> List[str]:
-        """Turn the 'errors' list in a failed API response into CLI error lines."""
+        """Turn a failed API response into short CLI error lines (no raw HTTP dump)."""
         messages: List[str] = []
         if ae.body:
             try:
@@ -104,9 +111,37 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
             except (ValueError, AttributeError):
                 pass
         if not messages:
-            messages.append(f"{command}: error: SLURM API request failed (HTTP {ae.status}): {ae.reason}")
+            if not ae.status:
+                # raised by the client itself, e.g. for TLS errors: no HTTP response at all
+                messages.append(f"{command}: error: cannot reach the SLURM API: {ae.reason}")
+            else:
+                messages.append(f"{command}: error: SLURM API request failed (HTTP {ae.status}): {ae.reason}")
+        if ae.status in V43SlurmAPIClientWrapper.AUTH_FAILURE_STATUSES:
+            messages.append(f"{command}: error: the SLURM API did not accept the token in SLURM_JWT (missing, invalid or expired?)")
         return messages
 
+    @staticmethod
+    def format_response_errors(errors, command: str) -> List[str]:
+        """Errors listed in a (successful) API response, as CLI error lines."""
+        lines: List[str] = []
+        for err in errors or []:
+            description = getattr(err, "description", None) or ""
+            error = getattr(err, "error", None) or ""
+            lines.append(f"{command}: error: {description}{': ' if description and error else ''}{error}" if (description or error) else f"{command}: error: {err}")
+        return lines
+
+    @staticmethod
+    def log_response_warnings(warnings, command: str) -> None:
+        """slurmrestd adds informational warnings (e.g. 'Zero jobs to dump') that the real
+        commands don't print; they are only logged at debug level."""
+        for w in warnings or []:
+            logging.getLogger(__name__).debug("%s: SLURM API warning: %s", command, getattr(w, "description", None) or w)
+
+    @staticmethod
+    def connection_error(e: Exception, command: str, conf: openapi_client.Configuration) -> List[str]:
+        """The SLURM API could not be reached (wrong URL, DNS, network, TLS)."""
+        reason = getattr(e, "reason", None) or e
+        return [f"{command}: error: cannot reach the SLURM API at {conf.host}: {reason}"]
 
 
     def scancel_delete_request(self,request:dict,conf:openapi_client.Configuration,slurmrestd_token:str,quiet:bool=False)-> SlurmCommandResponse:
@@ -132,6 +167,9 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
                 if api_response is None or not api_response.status:
                     response.errors.extend(V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "scancel"))
                     return response
+            except Urllib3HTTPError as ce:
+                response.errors.extend(V43SlurmAPIClientWrapper.connection_error(ce, "scancel", configuration))
+                return response
             except Exception as e:
                 raise ApiClientException(f'Unexpected error while performing a DELETE request for the scancel command:{e}') from e
 
@@ -191,29 +229,13 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
                 
                 return response
 
-            #Capturing and encapsulating errors resported as a service exception
-            except ServiceException as se:
-                if (se.body):
-                    exception_body = json.loads(se.body)
-                    se_errors:List[dict] = exception_body['errors']
-                    for ex_err in se_errors:
-                        response.errors.append(f"{ex_err['description']}:{ex_err['error']}")
-                    return response
-                else:
-                    raise ApiClientException(f'Unexpected error while performing an UPDATE request for the scontrol command:{se}') from se                
-            
-            #Capturing and encapsulating errors related to invalid job_ids, reported by the
-            # client as exceptions
-            except NotFoundException as ne:
-                if (ne.body):
-                    exception_body = json.loads(ne.body)
-                    ne_errors:List[dict] = exception_body['errors']
-                    for ex_err in ne_errors:
-                        response.errors.append(f"{ex_err['description']}:{ex_err['error']}")
-                    return response
-                else:
-                    raise ApiClientException(f'Unexpected error while performing an UPDATE request for the scontrol command:{ne}') from ne                
-                
+            # API errors (job not found, authentication, permissions, ...): Slurm's message
+            except ApiException as ae:
+                response.errors.extend(V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "scontrol"))
+                return response
+            except Urllib3HTTPError as ce:
+                response.errors.extend(V43SlurmAPIClientWrapper.connection_error(ce, "scontrol", configuration))
+                return response
 
             #Any other error would be reported as an unexpected one
             except Exception as e:                
@@ -234,25 +256,20 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
             try:
                 # get list of jobs
                 api_response:V0043OpenapiJobInfoResp = api_instance.slurm_v0043_get_jobs()
-                
-                output = V43SlurmAPIClientWrapper.process_squeue_output(cli_arguments=cli_arguments,api_response=api_response)
+            except ApiException as ae:
+                return SlurmCommandResponse(errors=V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "squeue"))
+            except Urllib3HTTPError as ce:
+                return SlurmCommandResponse(errors=V43SlurmAPIClientWrapper.connection_error(ce, "squeue", configuration))
+            except Exception as e:
+                raise ApiClientException(f'Unexpected error while performing a GET request for the squeue command:{e}') from e
 
-                if (api_response.errors is not None):
-                    #Transform list of list[V0043Error] to list[str] 
-                    errors:list[str] = list(map(lambda err: str(err), api_response.errors))
-                else:
-                    errors = []
+            errors = V43SlurmAPIClientWrapper.format_response_errors(api_response.errors, "squeue")
+            V43SlurmAPIClientWrapper.log_response_warnings(api_response.warnings, "squeue")
+            if errors:
+                return SlurmCommandResponse(errors=errors)
 
-                if (api_response.warnings is not None):
-                    #Transform list of list[V0043Warning] to list[str] 
-                    warnings:list[str] = list(map(lambda err: str(err), api_response.warnings))
-                else:
-                    warnings = []
-
-                return SlurmCommandResponse(output=output,errors=errors,warnings=warnings)
-        
-            except Exception as e:       
-                raise ApiClientException(f'Unexpected error while performing a GET request for the squeue command:{e}') from e                
+            output = V43SlurmAPIClientWrapper.process_squeue_output(cli_arguments=cli_arguments,api_response=api_response)
+            return SlurmCommandResponse(output=output)
 
 
     def sinfo_get_request(self,cli_arguments:dict,conf:openapi_client.Configuration,slurmrestd_token:str)-> SlurmCommandResponse:
@@ -266,25 +283,20 @@ class V43SlurmAPIClientWrapper(SlurmAPIClientWrapper):
             try:
                 # get all partition info
                 api_response:V0043OpenapiPartitionResp = api_instance.slurm_v0043_get_partitions()
-
-                if (api_response.errors is not None):
-                    #Transform list of list[V0043Error] to list[str] 
-                    errors:list[str] = list(map(lambda err: str(err), api_response.errors))
-                else:
-                    errors = []
-
-                if (api_response.warnings is not None):
-                    #Transform list of list[V0043Warning] to list[str] 
-                    warnings:list[str] = list(map(lambda err: str(err), api_response.warnings))
-                else:
-                    warnings = []
-
-                output = V43SlurmAPIClientWrapper.process_sinfo_output(cli_arguments=cli_arguments,api_response=api_response)
-                
-                return SlurmCommandResponse(output=output,errors=errors,warnings=warnings)
-            
+            except ApiException as ae:
+                return SlurmCommandResponse(errors=V43SlurmAPIClientWrapper.errors_from_api_exception(ae, "sinfo"))
+            except Urllib3HTTPError as ce:
+                return SlurmCommandResponse(errors=V43SlurmAPIClientWrapper.connection_error(ce, "sinfo", configuration))
             except Exception as e:
-                raise ApiClientException(f'Unexpected error while performing a GET request for the squeue command:{e}') from e 
+                raise ApiClientException(f'Unexpected error while performing a GET request for the sinfo command:{e}') from e
+
+            errors = V43SlurmAPIClientWrapper.format_response_errors(api_response.errors, "sinfo")
+            V43SlurmAPIClientWrapper.log_response_warnings(api_response.warnings, "sinfo")
+            if errors:
+                return SlurmCommandResponse(errors=errors)
+
+            output = V43SlurmAPIClientWrapper.process_sinfo_output(cli_arguments=cli_arguments,api_response=api_response)
+            return SlurmCommandResponse(output=output)
 
 
     @staticmethod
